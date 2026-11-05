@@ -1,0 +1,12 @@
+smolagents[toolkit,litellm]
+wikipedia-api
+requests
+python-dotenv
+pandas
+openpyxl
+xlrd
+pypdf
+python-docx
+pillow
+youtube-transcript-api
+faster-whisper
