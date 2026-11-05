@@ -2,15 +2,9 @@
 import os
 import re
 
-from smolagents import (
-    CodeAgent,
-    DuckDuckGoSearchTool,
-    LiteLLMModel,
-    VisitWebpageTool,
-    WikipediaSearchTool,
-)
+from smolagents import CodeAgent, LiteLLMModel, WikipediaSearchTool
 
-from tools import read_file, transcribe_audio, youtube_transcript
+from tools import USER_AGENT, read_file, transcribe_audio, visit_webpage, web_search, youtube_transcript
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg"}
@@ -37,15 +31,19 @@ Answer format (the answer is checked by EXACT MATCH, so this is critical):
 
 def build_model():
     model_id = os.getenv("MODEL_ID", "gpt-4.1")
-    return LiteLLMModel(model_id=model_id)
+    return LiteLLMModel(
+        model_id=model_id,
+        timeout=float(os.getenv("LLM_TIMEOUT", "120")),
+        num_retries=int(os.getenv("LLM_RETRIES", "2")),
+    )
 
 
 def build_agent() -> CodeAgent:
     return CodeAgent(
         tools=[
-            DuckDuckGoSearchTool(max_results=8),
-            VisitWebpageTool(),
-            WikipediaSearchTool(),
+            web_search,
+            visit_webpage,
+            WikipediaSearchTool(user_agent=USER_AGENT),
             read_file,
             transcribe_audio,
             youtube_transcript,
@@ -56,6 +54,7 @@ def build_agent() -> CodeAgent:
             "collections", "itertools", "fractions", "decimal", "unicodedata", "csv",
         ],
         max_steps=int(os.getenv("MAX_STEPS", "15")),
+        code_block_tags="markdown",
         verbosity_level=1,
     )
 
@@ -63,6 +62,7 @@ def build_agent() -> CodeAgent:
 def clean_answer(answer) -> str:
     """Normalize the model output for exact-match scoring."""
     s = str(answer).strip()
+    s = next((line for line in s.splitlines() if line.strip()), "").strip()
     s = re.sub(r"^\s*(final answer|answer)\s*[:\-]\s*", "", s, flags=re.IGNORECASE)
     s = s.strip().strip('"').strip("'").strip()
     # drop a single trailing period ("Paris." -> "Paris"), but keep things like "U.S."
@@ -71,7 +71,7 @@ def clean_answer(answer) -> str:
     return s
 
 
-def answer_question(question: str, file_path: str | None = None) -> str:
+def answer_question(question: str, file_path: str | None = None, missing_file: str | None = None) -> str:
     agent = build_agent()  # a fresh agent per question => clean memory
     task = f"{INSTRUCTIONS}\n\nQuestion:\n{question}"
     images = None
@@ -88,6 +88,11 @@ def answer_question(question: str, file_path: str | None = None) -> str:
             task += "\nIt is an audio file: use transcribe_audio on it."
         else:
             task += "\nUse read_file on it (or open it with pandas in code)."
+    elif missing_file:
+        task += (
+            f"\n\nThe question refers to an attached file ({missing_file}), but it could not be downloaded. "
+            "Do not look for it on disk; answer as best you can without it."
+        )
 
     result = agent.run(task, images=images) if images else agent.run(task)
     return clean_answer(result)

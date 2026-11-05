@@ -1,16 +1,35 @@
 """Custom tools for the GAIA agent: reading attached files, audio transcription, YouTube transcripts."""
 import os
 import re
+import time
 
 from smolagents import tool
 
 MAX_CHARS = 40_000
+PAGE_MAX_CHARS = 150_000
+NOISE_TAGS = ["script", "style", "noscript", "nav", "header", "footer", "aside", "form", "svg"]
+NOISE_SELECTORS = [".mw-editsection", ".navbox", ".vertical-navbox", "#toc", ".toc"]
+USER_AGENT = "gaia-agent/1.0 (HF Agents Course Unit 4; research bot)"
 
 
-def _truncate(text: str) -> str:
-    if len(text) > MAX_CHARS:
-        return text[:MAX_CHARS] + f"\n\n[... truncated, total {len(text)} chars]"
+def _truncate(text: str, limit: int = MAX_CHARS) -> str:
+    if len(text) > limit:
+        return text[:limit] + f"\n\n[... truncated, total {len(text)} chars]"
     return text
+
+
+def _main_html(html: str) -> str:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(NOISE_TAGS):
+        tag.decompose()
+    for selector in NOISE_SELECTORS:
+        for tag in soup.select(selector):
+            tag.decompose()
+    main = soup.select_one("#mw-content-text") or soup.find("main") or soup.find("article") or soup.body or soup
+    title = soup.title.get_text(strip=True) if soup.title else ""
+    return f"<h1>{title}</h1>{main}"
 
 
 @tool
@@ -104,3 +123,70 @@ def youtube_transcript(url: str) -> str:
         return _truncate(" ".join(parts))
     except Exception as e:  # noqa: BLE001
         return f"Could not get transcript for {video_id}: {e}"
+
+
+_ddgs = None
+
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web (DuckDuckGo) and return the top results with titles, links and snippets.
+    If nothing is found, try a shorter or less specific query.
+
+    Args:
+        query: The search query.
+    """
+    global _ddgs
+    try:
+        from ddgs import DDGS
+
+        if _ddgs is None:
+            _ddgs = DDGS()
+        results = []
+        for attempt in range(2):
+            try:
+                results = [r for r in _ddgs.text(query, max_results=8) if r.get("href")]
+            except Exception:  # noqa: BLE001
+                results = []
+            if results:
+                break
+            time.sleep(1 + attempt)
+        if not results:
+            return f"No results found for '{query}'. Try a shorter or less specific query."
+        return "## Search Results\n\n" + "\n\n".join(
+            f"[{r.get('title', '')}]({r['href']})\n{r.get('body', '')}" for r in results
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"Search failed for '{query}': {e}"
+
+
+@tool
+def visit_webpage(url: str) -> str:
+    """Visit a webpage at the given url and read its main content as markdown (navigation and menus are removed).
+    Works for Wikipedia pages too. Long pages are returned almost in full: store the result in a variable
+    and search/slice it in code instead of printing everything.
+
+    Args:
+        url: The url of the webpage to visit.
+    """
+    try:
+        import requests
+        from markdownify import markdownify
+
+        response = requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT})
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "pdf" in content_type or response.content[:5] == b"%PDF-":
+            import io
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(response.content))
+            content = "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+        elif "html" in content_type or not content_type:
+            content = markdownify(_main_html(response.text)).strip()
+        else:
+            content = response.text.strip()
+        return _truncate(re.sub(r"\n{3,}", "\n\n", content), PAGE_MAX_CHARS)
+    except Exception as e:  # noqa: BLE001
+        return f"Error fetching the webpage: {e}"
